@@ -200,9 +200,7 @@ for d in \
   "$HOME/Library/Logs/Claude" \
   "$HOME/Library/Logs/Claude-3p" \
   "$HOME/Library/Preferences/com.anthropic.claudefordesktop.plist" \
-  "$HOME/Library/Saved Application State/com.anthropic.claudefordesktop.savedState" \
-  "$HOME/Library/HTTPStorages/com.anthropic.claudefordesktop" \
-  "$HOME/Library/WebKit/com.anthropic.claudefordesktop"
+  "$HOME/Library/HTTPStorages/com.anthropic.claudefordesktop"
 do
   [ -e "$d" ] && echo "  FAIL 存在: $d" || echo "  PASS 无:   $d"
 done
@@ -295,12 +293,24 @@ rm -rf -- \
   "$HOME/Library/Application Support/Claude" \
   "$HOME/Library/Application Support/Claude-3p" \
   "$HOME/Library/Preferences/com.anthropic.claudefordesktop.plist" \
-  "$HOME/Library/Saved Application State/com.anthropic.claudefordesktop.savedState" \
   "$HOME/Library/HTTPStorages/com.anthropic.claudefordesktop" \
-  "$HOME/Library/WebKit/com.anthropic.claudefordesktop" \
   "$HOME/.claude" \
   "$HOME/.claude.json.corrupted" \
   "$HOME/.claude.json.backup"
+```
+
+**身份锚点单独再确认一次**（不依赖父目录是否已删）：
+
+```bash
+# ant-did：两个候选目录都查
+for d in "$HOME/Library/Application Support/Claude" \
+         "$HOME/Library/Application Support/Claude-3p"; do
+  [ -e "$d/ant-did" ] && rm -f -- "$d/ant-did" && echo "删除 ant-did: $d" || true
+done
+
+# userID / machineID / oauthAccount 都在 ~/.claude.json 内部，
+# 文件删掉即消失，无需单独处理 —— 只要确认文件不存在：
+[ -e "$HOME/.claude.json" ] && echo "FAIL 仍存在" || echo "PASS 已清"
 ```
 
 Keychain：
@@ -312,6 +322,187 @@ done
 ```
 
 > `.taptap-maker.bak.latest` 的后缀来自第三方备份工具，不是 Anthropic 的命名。它同样是 `~/.claude.json` 的完整副本，含同样的身份字段，所以要一并删。
+
+### 2.2 ShipIt 是什么 `[观测]`
+
+**ShipIt 是 Squirrel.Mac 的更新安装器**，不是独立服务，也不是身份组件。它在后台把新版 `.app` 换进去，然后把 stderr 写到缓存目录。
+
+`index.chunk-BfOAx4v9.js`
+
+```js
+var xti = 16384, Sti = "ShipIt_stderr.log", Cti = 6e4;
+
+async function wti(e){
+  let t = n.default.join(a.app.getPath("home"), "Library", "Caches",
+                         "com.anthropic.claudefordesktop.ShipIt"),
+      r;
+  try {
+    let i, a = await o.default.promises.readdir(t);
+    for (let e of a){
+      if (!e.startsWith(Sti)) continue;
+      let r = n.default.join(t, e),
+          a = await o.default.promises.lstat(r).catch(() => void 0);
+      a?.isFile() && (!i || a.mtimeMs > i.mtimeMs) && (i = { logPath: r, mtimeMs: a.mtimeMs });
+    }
+    if (!i || (e !== void 0 && i.mtimeMs < e - Cti)) return;
+    r = await o.default.promises.open(i.logPath,
+          Pr.O_RDONLY | Pr.O_NOFOLLOW | Pr.O_NONBLOCK);
+    let s = await r.stat();
+    if (!s.isFile()) return;
+    let { size: c } = s, l = Math.min(c, xti), u = Buffer.alloc(l),
+        { bytesRead: d } = await r.read(u, 0, l, c - l),
+        f = u.subarray(0, d).toString("utf8");
+    if (c > l){ let e = f.indexOf(`\n`); f = e === -1 ? "" : f.slice(e + 1); }
+    return f.trim() || void 0;
+  } catch { return }
+  finally { await (r?.close().catch(() => void 0)) }
+}
+```
+
+要点：
+
+| 项 | 值 |
+|---|---|
+| 目录 | `~/Library/Caches/com.anthropic.claudefordesktop.ShipIt` |
+| 文件名前缀 | `ShipIt_stderr.log` |
+| 读取上限 | 最后 **16384 字节**（`xti`） |
+| 截断处理 | 超过上限时丢弃首个残缺行 |
+| 打开标志 | `O_NOFOLLOW` + `O_NONBLOCK`（防符号链接） |
+
+### 2.3 更新失败的记录与上报 `[观测]`
+
+```js
+function Eti(){
+  let e = n.default.join(a.app.getPath("userData"), wjn);   // wjn = "update-attempt"
+  let t = await o.default.promises.readFile(e, "utf-8");
+  try { await o.default.promises.unlink(e) }                // ← 读完即删
+  catch(e){ N.warn("[updater] Failed to remove update-attempt marker: %o", e) }
+
+  let r = JSON.parse(t);                                    // { fromVersion, toVersion, ts }
+  let i = typeof r.fromVersion == "string" ? r.fromVersion : void 0,
+      s = typeof r.toVersion   == "string" ? r.toVersion   : void 0,
+      c = typeof r.ts == "number" && Number.isFinite(r.ts) ? r.ts : void 0;
+
+  if (i && i === a.app.getVersion()){                       // 上次没装成功
+    pti = !0;
+    let e = _ti(s) ?? "", t = e ? bti(e) : void 0, n = dni(e);
+    N.warn("[updater] Previous update install did not apply (still at %s, attempted %s at %s)", i, s ?? "?", Tti(r.ts));
+    let r = await wti(c);
+    r ? (PEn()
+          ? N.warn("[updater] ShipIt stderr log found for the failed install (content withheld under compliance redaction)")
+          : N.warn(`[updater] ShipIt stderr tail for failed install:\n%s`, Af(r)))
+      : N.warn("[updater] No usable ShipIt stderr log for this install attempt"),
+    Q("desktop_update_install_failed", {
+      from_version: i,
+      to_version: e,
+      update_channel: xY(),
+      attempt: t,
+      payload_kind: n.kind,
+      payload_arch: n.arch,
+      shipit_stderr_tail: r          // ← 本机日志尾部随遥测上报
+    });
+  } else N.info("[updater] Previous update install succeeded (%s -> %s)", i ?? "?", a.app.getVersion());
+}
+```
+
+**这里有一个值得注意的点**：`desktop_update_install_failed` 事件会把 `shipit_stderr_tail`（本机日志尾部）作为遥测上报。合规模式下会被替换为 `content withheld under compliance redaction`，否则原文上报。
+
+`shipit_stderr_tail` 是本机文件内容，可能含路径、版本号、错误堆栈 —— 属于**本机环境信息外泄面**，但不是身份锚点。
+
+### 2.4 失败次数与放弃阈值 `[观测]`
+
+```js
+var hti = "updaterFailedInstall", gti = 2, TY = null;
+
+function bti(e){
+  TY = { targetVersion: e, attempts: (TY?.targetVersion === e ? TY.attempts : 0) + 1 };
+  try {
+    let e = { appVersion: a.app.getVersion(), ...TY };
+    bo.set(hti, e);                       // ← 持久化到 config.json
+  } catch (e) { N.warn("[updater] Failed to persist failed-install record: %o", e) }
+  return TY.attempts;
+}
+
+function vti(e){
+  let t = _ti(e);
+  return t !== void 0 && TY?.targetVersion === t && TY.attempts >= gti;   // gti = 2
+}
+
+function yti(){
+  TY = null;
+  try {
+    let e = bo.get(hti);
+    if (e === void 0) return;
+    if (e?.appVersion === a.app.getVersion()
+        && typeof e.targetVersion == "string"
+        && typeof e.attempts == "number"
+        && e.attempts >= 1){
+      TY = { targetVersion: e.targetVersion, attempts: e.attempts };
+      N.info("[updater] Install of %s has failed to apply %d time(s) at this version",
+             e.targetVersion, e.attempts);
+      return;
+    }
+    bo.delete(hti);
+  } catch (e) { N.warn("[updater] Failed to read failed-install record: %o", e) }
+}
+```
+
+**同一版本连续失败 2 次（`gti = 2`）后放弃。**
+
+### 2.5 `bo` 是哪个存储 `[观测]`
+
+```js
+var LSe = { configFileMode: 384, deserialize: (e) => { ... } };
+
+function HSe(){ /* 打开 config.json，遇 EBUSY/EIO/UNKNOWN 重试 250/500ms */ }
+
+function USe(){
+  try { return HSe() }
+  catch (e){
+    let t = e?.code;
+    if (!t || !RSe.has(t)) throw e;                 // RSe = EISDIR/ELOOP/ENOTDIR
+    let r = n.default.join(a.app.getPath("userData"), "config.json");
+    try { o.renameSync(r, `${r}.corrupt-${Date.now()}`) }
+    catch (t){ throw N.error("Could not move the unreadable config file aside: %o", { renameError: t }), e }
+    return N.error("Config file unreadable (%s), moved it aside and reset to defaults: %o", t, e), yo = !0, HSe();
+  }
+}
+
+var bo = USe();
+```
+
+`bo` 写在 **`<userData>/config.json`**。因此：
+
+| 产物 | 位置 | 是否被 userData 删除覆盖 |
+|---|---|---|
+| `updaterFailedInstall` | `<userData>/config.json` | ✅ |
+| `update-attempt` 标记 | `<userData>/update-attempt` | ✅ |
+| `config.json.corrupt-<ts>` | `<userData>/` | ✅ |
+| `window-state.json` | `<userData>/` | ✅ |
+
+**结论：ShipIt 相关的持久产物全部落在 userData 内，删目录即可，不需要单独处理。** 只有 `~/Library/Caches/...ShipIt` 的 stderr 日志在缓存区，需单独删。
+
+### 2.6 更新通道 `[观测]`
+
+```js
+function xY(){ return k7t() ? "staggered" : "production" }
+var AY = "stable";
+function jti(){ return AY === "latest" && !Zti() ? "stable" : AY }
+
+function SY(){
+  if (bY.checkIntervalTicks != null) return bY.checkIntervalTicks;
+  let e = cti()?.check_interval_ticks;
+  return typeof e == "number" && Number.isInteger(e) && e >= 1 && e < Xei
+    ? (N.info("[updater] Using GrowthBook check_interval_ticks=%d (default %d)", e, Xei), e)
+    : Xei;
+}
+```
+
+更新频率由 GrowthBook 的 `desktop_updater_config` 控制（`check_interval_ticks`、`unclean_exit_install_window_minutes` 等）。
+
+**对清理的含义**：ShipIt 不持有身份。它与 `installer_variant`（`msix` / `squirrel`）只是安装渠道标记，属于“本该稳定”的那类信号 —— 恢复时保持原渠道即可。
+
+---
 
 ## Gate 3　Windows 残留终检 `[可验]`
 
