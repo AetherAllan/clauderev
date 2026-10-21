@@ -95,7 +95,18 @@ Model: {{modelName}}
 User name: {{accountName}}
 User selected a folder: {{folderSelected}}
 </env>
+{{modelIdentity}}
 ```
+
+模板末尾还有 `{{modelIdentity}}`（`index.chunk-BfOAx4v9.js @2450854`）。
+
+**另有第二个 `<env>` 模板**，用于 CLI 管道输入路径（`index.chunk-oZ3hATSw.js @101409`），只含日期、不含时区：
+
+```js
+`</application_details>\n\n<env>\nToday's date: ${(new Date).toISOString().slice(0,10)}\n</env>`
+```
+
+即：**Code / Cowork 会话**走含时区的模板；**管道输入**走只含日期的模板。
 
 **② 填充实现**（`index.chunk-DuQJhuk4.js`）
 
@@ -122,11 +133,46 @@ TZ: Intl.DateTimeFormat().resolvedOptions().timeZone            // Claude Code �
 // 行为要点（minified，符号为实测标识）
 KVt()  → resolve(app.getPath("userData"), XBe)   // 落盘位置
        → randomUUID()                            // 首次生成
-       → 写入 base64 编码的 UUID
-       → chmod 0600
-       → 若 stat.nlink > 1 则拒绝复用（防硬链接伪造）
-qv()   → 统一读取入口
+       → 写入 base64 编码的 UUID（mode 0o600，flag "wx"）
+qv()   → 统一读取入口（带记忆化：zVt ??= KVt()）
 ```
+
+**完整实现**（`index.chunk-BfOAx4v9.js @2045945`）：
+
+```js
+function KVt(){
+  try {
+    let e = n.default.resolve(a.app.getPath("userData"), XBe);   // XBe = "ant-did"
+    try {
+      let t = WVt(e);                       // base64 解码 + UUID 正则校验
+      if (t !== void 0) return t;           // 有效 → 直接复用
+      let n = o.default.lstatSync(e);
+      if (!n.isFile() || n.nlink > 1) throw Error("ant-did is not a plain file");
+      o.default.rmSync(e);                  // 普通文件但内容无效 → 删除
+    } catch (e) { if (e?.code !== "ENOENT") throw e }
+    let t = (0, f.randomUUID)();
+    try { GVt(e, t); }                      // writeFileSync + base64 + mode 384
+    catch (t) {
+      if (t?.code === "EEXIST") { let t = WVt(e); if (t !== void 0) return t }
+      throw t;
+    }
+    return t;
+  } catch (e) {
+    BVt = !1;
+    return N.error("Failed to read or write install file", e), (0, f.randomUUID)();
+  }
+}
+```
+
+三种行为：
+
+| 情形 | 结果 |
+|---|---|
+| 内容有效 | 直接复用 |
+| 普通文件但内容无效（`nlink === 1`） | **删除后重建** |
+| 非普通文件，或 `nlink > 1` | 抛 `"ant-did is not a plain file"` → 走外层兜底 |
+
+**外层兜底值得注意**：读写失败时返回一个**不落盘的临时 UUID** 并置 `BVt = false`。它每次启动都会变，表现为“设备标识不稳定”。
 
 **三处使用点：**
 
@@ -146,26 +192,63 @@ install_id: qv()
 `index.chunk-BfOAx4v9.js` 的 `jAn()` 构造 `/api/event_logging/v2/batch` 元数据：
 
 ```text
-product_surface: "claude-desktop"
-desktop_variant, deployment_mode, config_source
-app_version, commit_hash
-platform, arch, installer_variant, store_build, running_under_translation
-os_version, os_release, os_build, os_build_revision
-cpu_model, device_class, total_memory
-free_memory, available_memory, system_commit_limit_bytes
-process_main_footprint_bytes, process_renderer_footprint_sum_bytes
+product_surface:      "claude-desktop"      ← 硬编码
+desktop_variant:      "production"          ← 硬编码
+deployment_mode:      G().type
+config_source:        d.type
+config_source_remote: d.remote
+app_version:          l.version
+commit_hash:          l.commitHash
+platform:             process.platform
+arch:                 process.arch
+installer_variant:    Mfe()   → "msix" | "squirrel"
+store_build:          false                ← 硬编码为 false
+running_under_translation: app.runningUnderARM64Translation
+os_version:           process.getSystemVersion()
+os_release:           os.release()
+os_build:             bO()
+cpu_model:            os.cpus()[0].model
+total_memory:         totalKb * 1024
+device_class:         NVt   ← 由 totalmem 派生
+free_memory:          freeKb * 1024
+available_memory:     availableKb * 1024
+system_commit_limit_bytes:      commitLimitKb * 1024
+system_commit_available_bytes:  commitAvailableKb * 1024
+process_main_footprint_bytes / process_renderer_footprint_sum_bytes
 process_renderer_main_view_heap_*
-app_session_id, install_id, app_uptime_seconds, window_count
+app_session_id, install_id: qv(), app_uptime_seconds, window_count
 organization_id, hipaa_origin_organization_id
 ```
 
-事件体：
+事件体（`jAn()` 内联构造）：
 
-```text
-event_type: "TelemetryEvent"
-user_properties.user_id
-auth.{ organization_uuid, account_uuid }
+```js
+h = {
+  event_type: "TelemetryEvent",
+  event_data: {
+    event_name: e,
+    timestamp: new Date(c).toISOString(),
+    user_properties: { user_id: i || "anonymous" },
+    metadata: $kn(m),
+    ...(r || i) ? { auth: {
+      ...(r && { organization_uuid: r }),
+      ...(i && { account_uuid: i })
+    } } : {}
+  }
+}
 ```
+
+### 各字段的实际来源
+
+| 字段 | 取值函数 | 实现 |
+|---|---|---|
+| `installer_variant` | `Mfe()` | `return $r() ? "msix" : "squirrel"` —— **只有两个值** |
+| `os_build` | `bO()` | darwin: 读 `/System/Library/CoreServices/SystemVersion.plist` 的 `ProductBuildVersion`；win32: 读注册表 `HKLM\<…>` 的 `BuildLabEx`；失败 → `"unknown"` |
+| `cpu_model` | `VEn()` | `os.cpus()[0]?.model ?? null` |
+| `device_class` | `NVt` | `MVt(os.totalmem())` —— 由总内存派生 |
+| `running_under_translation` | Electron | `app.runningUnderARM64Translation` |
+
+`os_build` 在 macOS 上就是 **`ProductBuildVersion`**（形如 `24A335`），与 `os_version`（形如 `15.1`）是两个维度。
 
 ## 8. 信号四：系统语言 / locale [观测]
 
@@ -188,6 +271,53 @@ function Xgt(){
 ```
 
 配套还有 `app.getSystemLocale()` 与渲染侧 `Intl` / `navigator.languages`。
+
+### 语言列表还会直接交给渲染进程 [观测]
+
+`index.chunk-BfOAx4v9.js` 的 `NK()`
+
+```js
+var JUr = "--desktop-managed-config=";
+
+function YUr(e){
+  let t = [];
+  for (let n of e){
+    let e = n.split(/[.@]/, 1)[0].replace(/_/g, "-");     // en_US.UTF-8 → en-US
+    e === "" || e === "C" || e === "POSIX" || t.includes(e) || t.push(e);
+  }
+  return t;
+}
+
+function NK(){
+  let e = G();
+  return `${JUr}${JSON.stringify({
+    ...sKe(),
+    deploymentMode: e.type,
+    appVersion: a.app.getVersion(),
+    cookielessOrigin: e.type === "3p",
+    deploymentOrganizationUuid: e.telemetryOrgUuid() ?? void 0,
+    deviceClass: NVt,
+    preferredSystemLanguages: YUr(a.app.getPreferredSystemLanguages()),
+    ...iKt()
+  })}`;
+}
+```
+
+这条串进 `process.argv`，预加载脚本再桥接给页面：
+
+```js
+let n = process.argv.find((e) => e.startsWith(Al));
+if (n) try {
+  let e = JSON.parse(n.slice(Al.length));
+  t.contextBridge.exposeInMainWorld("desktopManagedConfig", e);
+  t.contextBridge.exposeInMainWorld("desktopEnterpriseConfig", e);
+  t.contextBridge.exposeInMainWorld("desktopTelemetryConfig", e);
+  t.contextBridge.exposeInMainWorld("desktopDeviceClass", e.deviceClass);
+  t.contextBridge.exposeInMainWorld("desktopPreferredLanguages", e.preferredSystemLanguages);
+} catch {}
+```
+
+**远端 `claude.ai` 页面可直接读取 `window.desktopPreferredLanguages` 与 `window.desktopDeviceClass`**，不需要经过系统提示词。规范化规则：去 `.`/`@` 后缀、`_`→`-`、过滤 `C`/`POSIX`、去重。
 
 ## 9. 信号五：macOS 本地 VPN 接口探测 [观测]
 
@@ -245,38 +375,186 @@ console_tail, kernel_console_tail, service_log_tail, diagnostic_error
 `Kv()` —— GrowthBook 每次拉配置都带：
 
 ```js
-{
-  "anthropic-client-platform":         <值>,
-  "anthropic-client-app":              <值>,
-  "anthropic-client-version":          app.getVersion(),
-  "anthropic-client-device-class":     <值>,
-  "anthropic-client-total-memory-gb":  String(<值>),
-  "anthropic-client-os-platform":      process.platform,
-  "anthropic-client-os-version":       process.getSystemVersion(),
-  "anthropic-device-id":               <ant-did>
+var FVt = "desktop_app", IVt = "com.anthropic.claudefordesktop";
+var PVt = Math.round(os.totalmem() / 1024 ** 3);
+
+function Kv(){
+  return {
+    "anthropic-client-platform":        FVt,               // "desktop_app"
+    "anthropic-client-app":             IVt,               // "com.anthropic.claudefordesktop"
+    "anthropic-client-version":         a.app.getVersion(),
+    "anthropic-client-device-class":    <由 totalmem 派生>,
+    "anthropic-client-total-memory-gb": String(PVt),
+    "anthropic-client-os-platform":     process.platform,
+    "anthropic-client-os-version":      process.getSystemVersion(),
+    "anthropic-device-id":              Ist(qv())
+  };
 }
 ```
+
+`Ist()` 是净化函数，不是编码器：
+
+```js
+function Ist(e){
+  if (e.length === 0) return e;
+  let t = e.replace(/[^\x20-\x7E]/g, "").trim();
+  return t.length > 0 ? t : "invalid";
+}
+```
+
+### 全部 8 个 `anthropic-client-*` 头 `[观测]`
+
+```
+anthropic-client-app
+anthropic-client-device-class
+anthropic-client-feature
+anthropic-client-os-platform
+anthropic-client-os-version
+anthropic-client-platform
+anthropic-client-total-memory-gb
+anthropic-client-version
+```
+
+### 客户端平台枚举 `[观测]`
+
+`index.chunk-BfOAx4v9.js @1497139`
+
+```js
+var Fst = function(e){
+  return e.UNKNOWN   = "unknown",
+         e.ANDROID   = "android",
+         e.IOS       = "ios",
+         e.DESKTOP_APP = "desktop_app",
+         e.WEB_CLAUDE_AI = "web_claude_ai",
+         e.WEB_CONSOLE   = "web_console",
+         e.WEB_CUSTOM_AGENTS = "web_custom_agents",
+         e.WEB_TRUST_PORTAL  = "web_trust_portal",
+         e.WEB_ADMIN  = "web_admin",
+         e.WEB_AUTH   = "web_auth", e;
+}({});
+```
+
+### `anthropic-device-id` 的两处使用 `[观测]`
+
+```js
+// ① GrowthBook 拉配置
+n = await a.net.fetch(t, {
+  headers: VVt() ? { ...r, "anthropic-device-id": Ist(qv()) } : r,
+  signal: AbortSignal.timeout(kHt)
+});
+
+// ② OAuth authorize
+f = await eTn(`${e.apiHost}/v1/oauth/${o}/authorize`, {
+  method: "POST",
+  headers: {
+    "anthropic-version": "2023-06-01",
+    Authorization: `Bearer ${s}`,
+    "Content-Type": "application/json",
+    "anthropic-client-platform": Fst.DESKTOP_APP,
+    "anthropic-client-version": a.app.getVersion(),
+    ...c ? { "anthropic-device-id": Ist(c) } : {}
+  },
+  body: JSON.stringify({
+    response_type: "code", client_id: e.clientId,
+    organization_uuid: o, redirect_uri: e.redirectUri,
+    scope: n ? WO(e) : e.scope, state: d,
+    code_challenge: u, code_challenge_method: "S256"
+  })
+});
+```
+
+第三处是遥测里的 `install_id: qv()`（同源同值，非请求头）。
 
 CLI 侧对应：`anthropic-client-platform`、`anthropic-client-version`、`anthropic-client-feature`、`anthropic-client-request-reason`、`x-organization-uuid`。
 
 ## 11. 错误码映射 [观测]
 
-`index.chunk-DWOgY7DF.js`：
+`extract/mac/asar/.vite/build/index.chunk-DWOgY7DF.js @4866`
 
 ```js
-case "tenant_restriction_violation":
-case "ip_not_in_allowed_range":    return PolicyBlocked;        // POLICY_BLOCKED
-case "account_banned":             return { errorCode: r.AccountBanned };  // ACCOUNT_BANNED
-case "account_needs_verification": return NeedsVerification;
-case "org_mismatch":
-case "not_chat_org":
-case "cmek_blocked":
-case "feature_off":                /* ... */
+function ye({ code: e, body: n }){
+  let r = t.W2;
+  switch (e){
+    case "org_mismatch":
+      return t.d(), { errorCode: r.OrgMismatch };                 // ORG_MISMATCH
+    case "tenant_restriction_violation":
+    case "ip_not_in_allowed_range":
+      return { errorCode: r.PolicyBlocked };                      // POLICY_BLOCKED
+    case "account_banned":
+      return { errorCode: r.AccountBanned };                      // ACCOUNT_BANNED
+    case "account_needs_verification":
+      return { errorCode: r.NeedsVerification };                  // ACCOUNT_NEEDS_VERIFICATION
+    case "feature_off":
+      return { errorCode: r.OrgDisabled };                        // ORG_EXPORT_DISABLED
+    case "not_chat_org":
+    case "cmek_blocked":
+      return { errorCode: r.OrgBlocked };                         // ORG_EXPORT_BLOCKED
+    case "feature_unregistered":
+    case "not_a_member":
+      return { errorCode: r.TemporarilyUnavailable };             // TEMPORARILY_UNAVAILABLE
+    case "user_mismatch_email":
+    case "invalid_email_format":
+    case "user_mismatch_scim":
+      return t.d(), { errorCode: r.UserMismatch };                // USER_MISMATCH
+    case void 0:
+      return n.includes("account_needs_verification") ? { errorCode: r.NeedsVerification }
+           : n.includes("disabled for your organization") ? { errorCode: r.OrgDisabled }
+           : n.includes("not available for this organization") ? { errorCode: r.OrgBlocked }
+           : n.includes("Organization mismatch") ? (t.d(), { errorCode: r.OrgMismatch })
+           : n.includes("user_mismatch") ? (t.d(), { errorCode: r.UserMismatch })
+           : {};
+    default: return {};
+  }
+}
 ```
 
-枚举定义（`index.chunk-BfOAx4v9.js`）：`POLICY_BLOCKED`、`ACCOUNT_BANNED`、`ACCOUNT_NEEDS_VERIFICATION`、`ORG_EXPORT_BLOCKED`、`RATE_LIMITED` 等。
+### 映射表
 
-> 客户端里**没有任何**"我要封你"的逻辑，只有把服务端 `code` 映射成 UI 状态。
+| 服务端 `code` | 客户端状态 |
+|---|---|
+| `org_mismatch` | `ORG_MISMATCH` |
+| `tenant_restriction_violation` / `ip_not_in_allowed_range` | `POLICY_BLOCKED` |
+| `account_banned` | `ACCOUNT_BANNED` |
+| `account_needs_verification` | `ACCOUNT_NEEDS_VERIFICATION` |
+| `feature_off` | `ORG_EXPORT_DISABLED` |
+| `not_chat_org` / `cmek_blocked` | `ORG_EXPORT_BLOCKED` |
+| `feature_unregistered` / `not_a_member` | `TEMPORARILY_UNAVAILABLE` |
+| `user_mismatch_email` / `invalid_email_format` / `user_mismatch_scim` | `USER_MISMATCH` |
+
+枚举字面值 `[观测]`：`OrgMismatch="ORG_MISMATCH"`、`PolicyBlocked="POLICY_BLOCKED"`、`AccountBanned="ACCOUNT_BANNED"`、`NeedsVerification="ACCOUNT_NEEDS_VERIFICATION"`、`OrgDisabled="ORG_EXPORT_DISABLED"`、`OrgBlocked="ORG_EXPORT_BLOCKED"`、`TemporarilyUnavailable="TEMPORARILY_UNAVAILABLE"`、`UserMismatch="USER_MISMATCH"`。
+
+### 上下文：这是导出/导入任务的映射
+
+状态值本身说明了作用域 —— `ORG_EXPORT_DISABLED` / `ORG_EXPORT_BLOCKED` 都带 **EXPORT**。`ye()` 属于 claude-ai 数据导出/导入流程，同文件内还有三个导出专用态：
+
+```js
+case "export_expired":        return { errorCode: a.ExportExpired,  dropPending: !0 };
+case "export_consumed":
+case "export_link_used":      return { errorCode: a.ExportConsumed, dropPending: !0 };
+case "feature_off":           return { errorCode: a.OrgDisabled,    dropPending: !0 };
+default:
+  return i && e === 410
+    ? { errorCode: r.includes("expired") ? a.ExportExpired : a.ExportConsumed, dropPending: !0 }
+    : { errorCode: a.NotAvailable, ...(i && { dropPending: !0 }) };
+```
+
+`POLICY_BLOCKED` 与 `ACCOUNT_BANNED` 是跨流程复用的通用态，其余为导出专用。
+
+### body 文本兜底 `[观测]`
+
+`case void 0`（服务端未给结构化 `code`）时改用**响应体子串匹配**：
+
+```
+"account_needs_verification"          → NeedsVerification
+"disabled for your organization"      → OrgDisabled
+"not available for this organization" → OrgBlocked
+"Organization mismatch"               → OrgMismatch
+"user_mismatch"                       → UserMismatch
+```
+
+即：**服务端即使只回一段自然语言，只要命中这几个子串，客户端依然会映射成封禁/验证态。**
+
+> 客户端里**没有任何**"我要封你"的逻辑，只有把服务端 `code`（或其文案）映射成 UI 状态。
 
 ## 12. 遥测出口白名单 [观测]
 
@@ -1520,6 +1798,146 @@ trusted_device_attestation_failed
 | 地区拒绝码 | `ip_restricted` / `ip_not_in_allowed_range` / `restricted_regime_endpoint` | 同 + `lane_unavailable` | `region_missing` / `signups_disabled_in_region` / `region_unavailable`（边缘） |
 | 账号封禁码 | `account_banned` / `account_on_hold` | `organization_on_hold` / `org_access_revoked` | `account_banned` / `account_restricted`（LogoutReason） |
 | 原生 VPN 探测 | ✅ macOS `utun*` / `scutil --nc list` | ❌ | ❌ |
+
+---
+
+## 37. 目录候选表与数据位置 `[观测]`
+
+`index.chunk-BfOAx4v9.js @862179` 给出了 App 自己认可的**全部候选目录**：
+
+常量分别声明于两处（此处合并展示）：
+
+```js
+// @852516 附近
+var XBe = "ant-did", ZBe = "-Data";
+
+// @859045 附近
+var zl = "-3p", Bl = "Claude", PVe = `${Bl}`,
+    FVe = "Claude_pzs8sxrjxfjjc",
+    IVe = [ FVe, "AnthropicPBC.Claude_fnn82j28hfe8t" ],
+    LVe = `${PVe}${zl}`,                   // "Claude-3p"
+    Vl  = `${Bl}${zl}`,                    // "Claude-3p"
+    RVe = "Claude-NativeHost";
+
+var aHe = {
+  appData:     { at: () => a.app.getPath("appData"), msix: "Roaming" },
+  logsParent:  { at: () => n.dirname(a.app.getPath("logs")) },
+  localAppData:{ at: () => process.env.LOCALAPPDATA, msix: "Local" }
+};
+
+var oHe = {
+  darwin: [ ["appData", Bl], ["appData", Vl],       // Claude / Claude-3p
+            ["logsParent", Bl], ["logsParent", Vl] ],
+  linux:  [ ["appData", Bl], ["appData", Vl] ],
+  win32:  [ ["appData", Bl],
+            ["localAppData", Bl],
+            ["localAppData", `${Bl}${ZBe}`],        // Claude-Data
+            ["localAppData", Vl],                   // Claude-3p
+            ["appData", Vl],
+            ["appData", RVe] ]                      // Claude-NativeHost
+};
+
+function sHe(){
+  return (oHe[process.platform] ?? []).flatMap(([e, t]) => {
+    let { at: r, msix: i } = aHe[e], a = r();
+    return a ? [ n.join(a, t), ...i ? BVe(i, t) : [] ] : [];
+  });
+}
+
+function cHe(){
+  return process.env.CLAUDE_USER_DATA_DIR ? []
+    : [...new Set([ ...sHe(), ...KVe(), ...XVe(),
+        ...process.platform === "darwin" ? [nHe()] : [] ])];
+}
+```
+
+其中 `Bl = "Claude"`、`Vl = "Claude-3p"`。
+
+### 展开后的实际路径
+
+| 平台 | 路径 |
+|---|---|
+| macOS | `~/Library/Application Support/Claude` |
+| macOS | `~/Library/Application Support/Claude-3p` |
+| macOS | `~/Library/Logs/Claude` |
+| macOS | `~/Library/Logs/Claude-3p` |
+| Windows | `%APPDATA%\Claude` |
+| Windows | `%LOCALAPPDATA%\Claude` |
+| Windows | `%LOCALAPPDATA%\Claude-Data` |
+| Windows | `%LOCALAPPDATA%\Claude-3p` |
+| Windows | `%APPDATA%\Claude-3p` |
+| Windows | `%APPDATA%\Claude-NativeHost` |
+| Windows | `%LOCALAPPDATA%\Packages\<PFN>\LocalCache\…`（MSIX 虚拟化） |
+
+MSIX 包族名 `[观测]`：`Claude_pzs8sxrjxfjjc`、`AnthropicPBC.Claude_fnn82j28hfe8t`。
+
+### 日志目录的 `-3p` 处理
+
+```js
+function nHe(){
+  let e = a.app.getPath("logs"),
+      t = e.endsWith("-dev") ? "-dev" : "",
+      n = t ? e.slice(0, -t.length) : e;
+  return `${n.endsWith(zl) ? n.slice(0, -3) : `${n}${zl}`}${t}`;   // zl = "-3p"
+}
+```
+
+`nHe()` **强制**加 `-3p` 后缀（已有则去掉再加，保持单一后缀），并保留 `-dev`。
+
+### 配置库目录
+
+```js
+function $Ve(){ return n.join(Hl(), "configLibrary") }
+function Wl(e){ return n.join($Ve(), `${e}.json`) }
+function eHe(){ return n.join($Ve(), "_meta.json") }
+```
+
+即 `<userData>/configLibrary/<name>.json` 与 `_meta.json`。
+
+### 目录名参与遥测
+
+`NK()` 暴露的字段已含 `deploymentMode`；目录名后缀 `-3p` 与之对应。同时 `Mfe()` 把安装渠道折成两值：
+
+```js
+function Mfe(){ return $r() ? "msix" : "squirrel" }
+```
+
+---
+
+## 38. 同级目录扫描 `[观测]`
+
+`index.chunk-CxzPVbs5.js @5449`
+
+```js
+async function re(){
+  await n.S();
+  let e = c.app.getPath("userData"), r = t.S5();
+  let i = new Set([ c.app.getPath("appData") ]);
+  let a = t.het("CLAUDE_E2E_IMPORT_SIBLING_PARENT");
+  a && (i.clear(), i.add(a));
+  let o = new Set, l = [];
+  let u = (e) => { o.has(e.rootPath) || l.length >= p || (o.add(e.rootPath), l.push(I(e))) };
+
+  r !== e && await N(r) === "userData" && u({ label: P(basename(r)), rootPath: r, origin: "sibling-1p" });
+  await q() > 0 && u({ label: F(x()), rootPath: x(), origin: "terminal" });
+  await He(await n.h()) > 0 && u(L(e));
+
+  for (let t of i){
+    let n = await readdir(t).catch(() => []);
+    for (let i of n){
+      if (!i.startsWith("Claude")) continue;              // ← 扫所有 Claude* 目录
+      let n = join(t, i);
+      n !== e && n !== r && await N(n) === "userData"
+        && u({ label: P(i), rootPath: n, origin: "sibling-3p" });
+    }
+  }
+  return l;
+}
+```
+
+**判定条件只是 `startsWith("Claude")`**，因此 `Claude-3p`、`Claude-Data`、`Claude-NativeHost`、乃至任何以 `Claude` 开头的同级目录都会被列为“可导入的其他账号”。
+
+对应的持久化标记：`sibling-import.json`、`sibling-import-declined.json`，以及环境变量 `CLAUDE_DESKTOP_SIBLING_IMPORT_ORG`。
 
 ---
 
