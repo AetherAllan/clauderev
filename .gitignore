@@ -23,3 +23,11 @@ Claude-offline-*
 Claude-1.261019.*
 uptodown-*
 *_副本
+
+# benchmark 输出（含本机硬件 UUID / 主机名 / git 身份，勿提交）
+claude-location-benchmark.md
+claude-location-benchmark.json
+
+# Python
+__pycache__/
+*.pyc
